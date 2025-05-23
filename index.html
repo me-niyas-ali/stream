@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Stream Room</title>
+</head>
+<body>
+  <h1>Stream Room</h1>
+  <input type="text" id="roomId" placeholder="Enter 4-digit Room ID">
+  <button onclick="joinRoom(true)">Create Room</button>
+  <button onclick="joinRoom(false)">Join Room</button>
+  <p>Connected Viewers: <span id="viewerCount">0</span></p>
+  <video id="video" width="600" controls></video>
+
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script>
+    const socket = io('http://localhost:3000');
+    const video = document.getElementById('video');
+    let isHost = false;
+
+    function joinRoom(host) {
+      isHost = host;
+      const roomId = document.getElementById('roomId').value;
+      socket.emit('join-room', { roomId, isHost });
+
+      const githubFileUrl = 'https://raw.githubusercontent.com/youruser/yourrepo/main/yourvideo.mp4';
+      video.src = githubFileUrl;
+
+      if (!isHost) {
+        video.controls = false;
+        socket.emit('sync-request');
+      }
+    }
+
+    socket.on('video-control', data => {
+      if (!isHost) {
+        if (data.type === 'play') video.play();
+        if (data.type === 'pause') video.pause();
+        if (data.type === 'seek') video.currentTime = data.time;
+      }
+    });
+
+    socket.on('viewer-count', count => {
+      document.getElementById('viewerCount').textContent = count;
+    });
+
+    socket.on('sync-request', (id) => {
+      socket.emit('sync-response', { to: id, time: video.currentTime });
+    });
+
+    socket.on('sync-response', time => {
+      video.currentTime = time;
+    });
+
+    video.onplay = () => {
+      if (isHost) socket.emit('video-control', { type: 'play' });
+    };
+
+    video.onpause = () => {
+      if (isHost) socket.emit('video-control', { type: 'pause' });
+    };
+
+    video.onseeked = () => {
+      if (isHost) socket.emit('video-control', { type: 'seek', time: video.currentTime });
+    };
+  </script>
+</body>
+</html>
