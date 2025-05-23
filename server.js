@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -7,64 +8,53 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const rooms = {};
-
-// Serve static files from 'public' folder
+// Serve static client files
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+// Track connected devices per room
+const rooms = {};
 
-// Socket.IO logic (same as before)
 io.on('connection', socket => {
-  let currentRoom = null;
-
-  socket.on('join-room', ({ roomId, isHost }) => {
-    currentRoom = roomId;
+  socket.on('host-create', roomId => {
     socket.join(roomId);
+    socket.isHost = true;
+    rooms[roomId] = rooms[roomId] || { count: 0 };
+    rooms[roomId].count = 1;
+    io.to(roomId).emit('update-count', rooms[roomId].count);
+  });
 
+  socket.on('join-room', roomId => {
     if (!rooms[roomId]) {
-      rooms[roomId] = { host: isHost ? socket.id : null, clients: [] };
+      socket.emit('error', 'Room does not exist');
+      return;
     }
+    socket.join(roomId);
+    rooms[roomId].count++;
+    io.to(roomId).emit('update-count', rooms[roomId].count);
+    // Ask host for current time to sync new joiner
+    socket.to(roomId).emit('sync-request', socket.id);
+  });
 
-    rooms[roomId].clients.push(socket.id);
+  socket.on('sync-time', ({ targetId, currentTime }) => {
+    io.to(targetId).emit('sync', currentTime);
+  });
 
-    io.to(roomId).emit('viewer-count', rooms[roomId].clients.length);
+  socket.on('control', ({ roomId, action, time }) => {
+    // Only host should send this
+    io.to(roomId).emit('control', { action, time });
+  });
 
-    if (isHost) {
-      rooms[roomId].host = socket.id;
-    }
-
-    socket.on('video-control', data => {
-      if (socket.id === rooms[roomId].host) {
-        socket.to(roomId).emit('video-control', data);
-      }
-    });
-
-    socket.on('sync-request', () => {
-      if (rooms[roomId].host) {
-        io.to(rooms[roomId].host).emit('sync-request', socket.id);
-      }
-    });
-
-    socket.on('sync-response', ({ to, time }) => {
-      io.to(to).emit('sync-response', time);
-    });
-
-    socket.on('disconnect', () => {
-      if (currentRoom && rooms[currentRoom]) {
-        rooms[currentRoom].clients = rooms[currentRoom].clients.filter(id => id !== socket.id);
-        io.to(currentRoom).emit('viewer-count', rooms[currentRoom].clients.length);
-        if (rooms[currentRoom].clients.length === 0) {
-          delete rooms[currentRoom];
-        }
+  socket.on('disconnecting', () => {
+    const roomsJoined = Array.from(socket.rooms).filter(r => r !== socket.id);
+    roomsJoined.forEach(roomId => {
+      if (rooms[roomId]) {
+        rooms[roomId].count--;
+        io.to(roomId).emit('update-count', rooms[roomId].count);
+        if (rooms[roomId].count === 0) delete rooms[roomId];
       }
     });
   });
 });
 
-const port = process.env.PORT || 3000;
-server.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
-});
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
