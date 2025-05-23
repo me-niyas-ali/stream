@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html >
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -6,15 +6,32 @@
   <title>Simple Stream Room</title>
   <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
   <style>
-    body { margin: 0; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; padding: 1rem; }
-    #controls { margin-bottom: 1rem; }
-    #video-container { position: relative; width: 100%; max-width: 600px; }
-    video { width: 100%; border: 1px solid #ccc; border-radius: 8px; }
+    body { margin: 0;
+ font-family: sans-serif;
+ display: flex;
+ flex-direction: column;
+ align-items: center;
+ padding: 1rem;
+ }
+    #controls { margin-bottom: 1rem;
+ }
+    #video-container { position: relative;
+ width: 100%;
+ max-width: 600px;
+ }
+    video { width: 100%;
+ border: 1px solid #ccc;
+ border-radius: 8px;
+ }
     @media (max-width: 500px) {
-      body { padding: 0.5rem; }
-      video { border-radius: 4px; }
-    }
-  </style>
+ body {
+  padding: 0.5rem;
+ }
+ video {
+  border-radius: 4px;
+ }
+ }
+</style>
 </head>
 <body>
   <div id="controls">
@@ -23,18 +40,42 @@
     <div id="roomInput" style="display:none; margin-top:0.5rem;">
       <input id="roomId" type="text" placeholder="Enter 4-digit Room ID" maxlength="4" pattern="\\d{4}" />
       <button id="enterBtn">Enter</button>
-    </div>
+</div>
     <div id="status"></div>
-    <div>Connected devices: <span id="deviceCount">0</span></div>
-  </div>
+    <div>
+Connected devices: <span id="deviceCount">0</span>
+</div>
+</div>
 
   <div id="video-container" style="display:none;">
     <video id="streamVideo" controls>
       <!-- Replace VIDEO_URL with your GitHub raw file URL -->
-      <source id="videoSource" src="https://me-niyas-ali.github.io/getfile/cover-video.mp4" type="video/mp4"/>
+      <source id="videoSource" src="https://me-niyas-ali.github.io/getfile/cover-video.mp4" type="video/mp4" />
       Your browser does not support the video tag.
     </video>
-  </div>
+</div>
+  <div id="countdown" style="position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);font-size:48px;font-weight:bold;display:none;background:#000000a0;color:white;padding:20px;border-radius:10px;"></div>
+
+ <script>
+function showCountdown(seconds, onComplete) {
+  const countdownEl = document.getElementById('countdown');
+  countdownEl.style.display = 'block';
+
+  let remaining = seconds;
+  countdownEl.textContent = remaining;
+
+  const interval = setInterval(() => {
+   remaining--;
+   if (remaining > 0) {
+    countdownEl.textContent = remaining;
+   } else {
+    clearInterval(interval);
+    countdownEl.style.display = 'none';
+    onComplete();
+   }
+  }, 1000);
+  }
+ </script>
 
   <script>
     const socket = io();
@@ -51,66 +92,72 @@
     const deviceCountSpan = document.getElementById('deviceCount');
 
     function showInput(hosting) {
-      isHost = hosting;
-      roomInput.style.display = 'block';
-    }
+  isHost = hosting;
+  roomInput.style.display = 'block';
+  }
 
     hostBtn.onclick = () => showInput(true);
     joinBtn.onclick = () => showInput(false);
 
     enterBtn.onclick = () => {
-      const roomId = roomIdField.value;
-      if (!/^\d{4}$/.test(roomId)) {
-        alert('Please enter a valid 4-digit ID.');
-        return;
-      }
-      if (isHost) {
-        socket.emit('host-create', roomId);
-        statusDiv.textContent = `Hosting room ${roomId}`;
-      } else {
-        socket.emit('join-room', roomId);
-        statusDiv.textContent = `Joined room ${roomId}`;
-        video.controls = false;
-      }
-      hostBtn.disabled = true;
-      joinBtn.disabled = true;
-      roomInput.style.display = 'none';
-      videoContainer.style.display = 'block';
-    };
+  const roomId = roomIdField.value;
+  if (!/^\d{4}$/.test(roomId)) {
+   alert('Please enter a valid 4-digit ID.');
+   return;
+  }
+  if (isHost) {
+   socket.emit('host-create', roomId);
+   statusDiv.textContent = `Hosting room ${roomId}`;
+  } else {
+   socket.emit('join-room', roomId);
+   statusDiv.textContent = `Joined room ${roomId}`;
+   video.controls = false;
+  }
+  hostBtn.disabled = true;
+  joinBtn.disabled = true;
+  roomInput.style.display = 'none';
+  videoContainer.style.display = 'block';
+  };
 
     // Syncing and controls
     video.onplay = () => {
-      if (!isHost) return;
-      socket.emit('control', { roomId: roomIdField.value, action: 'play', time: video.currentTime });
-    };
+  if (!isHost) return;
+  socket.emit('control', {
+   roomId: roomIdField.value, action: 'play', time: video.currentTime
+  });
+  };
     video.onpause = () => {
-      if (!isHost) return;
-      socket.emit('control', { roomId: roomIdField.value, action: 'pause', time: video.currentTime });
-    };
+  if (!isHost) return;
+  socket.emit('control', {
+   roomId: roomIdField.value, action: 'pause', time: video.currentTime
+  });
+  };
 
     socket.on('control', ({ action, time }) => {
-      if (isHost) return;
-      video.currentTime = time;
-      if (action === 'play') video.play();
-      if (action === 'pause') video.pause();
-    });
+  if (isHost) return;
+  video.currentTime = time;
+  if (action === 'play') video.play();
+  if (action === 'pause') video.pause();
+  });
 
     socket.on('sync-request', targetId => {
-      // Host responds with current time
-      if (isHost) {
-        socket.emit('sync-time', { targetId, currentTime: video.currentTime });
-      }
-    });
+  // Host responds with current time
+  if (isHost) {
+   socket.emit('sync-time', {
+    targetId, currentTime: video.currentTime
+   });
+  }
+  });
 
     socket.on('sync', time => {
-      video.currentTime = time;
-    });
+  video.currentTime = time;
+  });
 
     socket.on('update-count', count => {
-      deviceCountSpan.textContent = count;
-    });
+  deviceCountSpan.textContent = count;
+  });
 
     socket.on('error', msg => alert(msg));
-  </script>
+ </script>
 </body>
 </html>
