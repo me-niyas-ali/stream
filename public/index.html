@@ -23,7 +23,7 @@
       const roomId = document.getElementById('roomId').value;
       socket.emit('join-room', { roomId, isHost });
 
-      const githubFileUrl = 'https://raw.githubusercontent.com/youruser/yourrepo/main/yourvideo.mp4';
+      const githubFileUrl = 'https://me-niyas-ali.github.io/getfile/the-proposal.mp4';
       video.src = githubFileUrl;
 
       if (!isHost) {
