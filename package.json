@@ -1,22 +1,14 @@
 {
-  "name": "stream-room",
+  "name": "stream-backend",
   "version": "1.0.0",
-  "description": "A simple stream room app with synchronized video playback using Socket.IO.",
   "main": "server.js",
+  "type": "module",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [
-    "socket.io",
-    "video",
-    "sync",
-    "stream",
-    "nodejs"
-  ],
-  "author": "Niyas",
-  "license": "MIT",
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.18.2",
-    "socket.io": "^4.7.2"
+    "ws": "^8.13.0"
   }
 }
