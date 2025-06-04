@@ -1,83 +1,176 @@
 const express = require('express');
-const { WebSocketServer } = require('ws');
 const http = require('http');
+const socketIo = require('socket.io');
+const cors = require('cors');
+const multer = require('multer');
+const fs = require('fs-extra');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
+const io = socketIo(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"]
+  }
+});
 
-const PORT = 3000;
+app.use(cors());
+app.use(express.json());
 
-// Serve static files
-app.use(express.static(path.join(__dirname, 'public')));
+// Temporary storage for uploaded files
+const upload = multer({ dest: 'uploads/' });
 
-// In-memory room storage
-const rooms = {}; // { '1234': { clients: Set<ws>, host: ws } }
+// Store active rooms
+const rooms = new Map();
 
-function generateRoomId() {
-  let id;
-  do {
-    id = Math.floor(1000 + Math.random() * 9000).toString();
-  } while (rooms[id]);
-  return id;
-}
+// Clean up uploads directory on startup
+fs.emptyDirSync('uploads');
 
-wss.on('connection', (ws) => {
-  ws.on('message', (msg) => {
-    const data = JSON.parse(msg);
-    if (data.type === 'create-room') {
-      const roomId = generateRoomId();
-      rooms[roomId] = { host: ws, clients: new Set([ws]) };
-      ws.roomId = roomId;
-      ws.isHost = true;
-      ws.send(JSON.stringify({ type: 'room-created', roomId }));
+// API endpoint to create a room
+app.post('/api/room', (req, res) => {
+  const roomId = Math.floor(1000 + Math.random() * 9000).toString();
+  rooms.set(roomId, {
+    users: new Set(),
+    videoPath: null,
+    playbackState: { isPlaying: false, currentTime: 0 }
+  });
+  res.json({ roomId });
+});
+
+// API endpoint to check if room exists
+app.get('/api/room/:roomId', (req, res) => {
+  const roomId = req.params.roomId;
+  if (rooms.has(roomId)) {
+    res.json({ exists: true });
+  } else {
+    res.status(404).json({ exists: false });
+  }
+});
+
+// Handle file upload
+app.post('/api/upload/:roomId', upload.single('video'), (req, res) => {
+  const roomId = req.params.roomId;
+  if (!rooms.has(roomId)) {
+    return res.status(404).send('Room not found');
+  }
+  
+  const room = rooms.get(roomId);
+  if (room.videoPath) {
+    fs.unlinkSync(room.videoPath);
+  }
+  
+  room.videoPath = req.file.path;
+  res.json({ success: true });
+});
+
+// Video streaming endpoint
+app.get('/api/stream/:roomId', (req, res) => {
+  const roomId = req.params.roomId;
+  if (!rooms.has(roomId) || !rooms.get(roomId).videoPath) {
+    return res.status(404).send('Video not found');
+  }
+  
+  const videoPath = rooms.get(roomId).videoPath;
+  const stat = fs.statSync(videoPath);
+  const fileSize = stat.size;
+  const range = req.headers.range;
+  
+  if (range) {
+    const parts = range.replace(/bytes=/, "").split("-");
+    const start = parseInt(parts[0], 10);
+    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+    const chunksize = (end - start) + 1;
+    const file = fs.createReadStream(videoPath, { start, end });
+    const head = {
+      'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+      'Accept-Ranges': 'bytes',
+      'Content-Length': chunksize,
+      'Content-Type': 'video/mp4',
+    };
+    res.writeHead(206, head);
+    file.pipe(res);
+  } else {
+    const head = {
+      'Content-Length': fileSize,
+      'Content-Type': 'video/mp4',
+    };
+    res.writeHead(200, head);
+    fs.createReadStream(videoPath).pipe(res);
+  }
+});
+
+// Socket.io connection handling
+io.on('connection', (socket) => {
+  let currentRoom = null;
+  
+  socket.on('join-room', (roomId) => {
+    if (!rooms.has(roomId)) {
+      socket.emit('room-error', 'Room does not exist');
+      return;
     }
-
-    if (data.type === 'join-room') {
-      const room = rooms[data.roomId];
-      if (room) {
-        room.clients.add(ws);
-        ws.roomId = data.roomId;
-        ws.isHost = false;
-        ws.send(JSON.stringify({ type: 'joined-room', roomId: data.roomId }));
-        broadcastClientCount(data.roomId);
-      } else {
-        ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
-      }
+    
+    currentRoom = roomId;
+    socket.join(roomId);
+    const room = rooms.get(roomId);
+    room.users.add(socket.id);
+    
+    // Notify about new connection
+    io.to(roomId).emit('user-count', room.users.size);
+    socket.emit('connection-status', 'Connected to server');
+    
+    // Send current playback state to new user
+    if (room.videoPath) {
+      socket.emit('playback-state', room.playbackState);
     }
   });
-
-  ws.on('close', () => {
-    const roomId = ws.roomId;
-    if (roomId && rooms[roomId]) {
-      const room = rooms[roomId];
-      room.clients.delete(ws);
-      if (ws.isHost) {
-        // End room if host disconnects
-        room.clients.forEach(client => {
-          client.send(JSON.stringify({ type: 'room-ended' }));
-          client.close();
-        });
-        delete rooms[roomId];
-      } else {
-        broadcastClientCount(roomId);
+  
+  socket.on('play', () => {
+    if (currentRoom) {
+      const room = rooms.get(currentRoom);
+      room.playbackState.isPlaying = true;
+      socket.to(currentRoom).emit('play');
+      io.to(currentRoom).emit('playback-state', room.playbackState);
+    }
+  });
+  
+  socket.on('pause', () => {
+    if (currentRoom) {
+      const room = rooms.get(currentRoom);
+      room.playbackState.isPlaying = false;
+      socket.to(currentRoom).emit('pause');
+      io.to(currentRoom).emit('playback-state', room.playbackState);
+    }
+  });
+  
+  socket.on('seek', (time) => {
+    if (currentRoom) {
+      const room = rooms.get(currentRoom);
+      room.playbackState.currentTime = time;
+      room.playbackState.isPlaying = false;
+      socket.to(currentRoom).emit('seek', time);
+      io.to(currentRoom).emit('playback-state', room.playbackState);
+    }
+  });
+  
+  socket.on('disconnect', () => {
+    if (currentRoom && rooms.has(currentRoom)) {
+      const room = rooms.get(currentRoom);
+      room.users.delete(socket.id);
+      io.to(currentRoom).emit('user-count', room.users.size);
+      
+      // Clean up room if empty
+      if (room.users.size === 0) {
+        if (room.videoPath) {
+          fs.unlinkSync(room.videoPath);
+        }
+        rooms.delete(currentRoom);
       }
     }
   });
 });
 
-function broadcastClientCount(roomId) {
-  const room = rooms[roomId];
-  if (!room) return;
-  const count = room.clients.size;
-  for (const client of room.clients) {
-    if (client.readyState === 1) {
-      client.send(JSON.stringify({ type: 'client-count', count }));
-    }
-  }
-}
-
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
