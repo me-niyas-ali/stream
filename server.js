@@ -1,60 +1,83 @@
-// server.js
 const express = require('express');
+const { WebSocketServer } = require('ws');
 const http = require('http');
-const { Server } = require('socket.io');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const wss = new WebSocketServer({ server });
 
-// Serve static client files
+const PORT = 3000;
+
+// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Track connected devices per room
-const rooms = {};
+// In-memory room storage
+const rooms = {}; // { '1234': { clients: Set<ws>, host: ws } }
 
-io.on('connection', socket => {
-  socket.on('host-create', roomId => {
-    socket.join(roomId);
-    socket.isHost = true;
-    rooms[roomId] = rooms[roomId] || { count: 0 };
-    rooms[roomId].count = 1;
-    io.to(roomId).emit('update-count', rooms[roomId].count);
-  });
+function generateRoomId() {
+  let id;
+  do {
+    id = Math.floor(1000 + Math.random() * 9000).toString();
+  } while (rooms[id]);
+  return id;
+}
 
-  socket.on('join-room', roomId => {
-    if (!rooms[roomId]) {
-      socket.emit('error', 'Room does not exist');
-      return;
+wss.on('connection', (ws) => {
+  ws.on('message', (msg) => {
+    const data = JSON.parse(msg);
+    if (data.type === 'create-room') {
+      const roomId = generateRoomId();
+      rooms[roomId] = { host: ws, clients: new Set([ws]) };
+      ws.roomId = roomId;
+      ws.isHost = true;
+      ws.send(JSON.stringify({ type: 'room-created', roomId }));
     }
-    socket.join(roomId);
-    rooms[roomId].count++;
-    io.to(roomId).emit('update-count', rooms[roomId].count);
-    // Ask host for current time to sync new joiner
-    socket.to(roomId).emit('sync-request', socket.id);
-  });
 
-  socket.on('sync-time', ({ targetId, currentTime }) => {
-    io.to(targetId).emit('sync', currentTime);
-  });
-
-  socket.on('control', ({ roomId, action, time }) => {
-    // Only host should send this
-    io.to(roomId).emit('control', { action, time });
-  });
-
-  socket.on('disconnecting', () => {
-    const roomsJoined = Array.from(socket.rooms).filter(r => r !== socket.id);
-    roomsJoined.forEach(roomId => {
-      if (rooms[roomId]) {
-        rooms[roomId].count--;
-        io.to(roomId).emit('update-count', rooms[roomId].count);
-        if (rooms[roomId].count === 0) delete rooms[roomId];
+    if (data.type === 'join-room') {
+      const room = rooms[data.roomId];
+      if (room) {
+        room.clients.add(ws);
+        ws.roomId = data.roomId;
+        ws.isHost = false;
+        ws.send(JSON.stringify({ type: 'joined-room', roomId: data.roomId }));
+        broadcastClientCount(data.roomId);
+      } else {
+        ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
       }
-    });
+    }
+  });
+
+  ws.on('close', () => {
+    const roomId = ws.roomId;
+    if (roomId && rooms[roomId]) {
+      const room = rooms[roomId];
+      room.clients.delete(ws);
+      if (ws.isHost) {
+        // End room if host disconnects
+        room.clients.forEach(client => {
+          client.send(JSON.stringify({ type: 'room-ended' }));
+          client.close();
+        });
+        delete rooms[roomId];
+      } else {
+        broadcastClientCount(roomId);
+      }
+    }
   });
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+function broadcastClientCount(roomId) {
+  const room = rooms[roomId];
+  if (!room) return;
+  const count = room.clients.size;
+  for (const client of room.clients) {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify({ type: 'client-count', count }));
+    }
+  }
+}
+
+server.listen(PORT, () => {
+  console.log(`Server running at http://localhost:${PORT}`);
+});
