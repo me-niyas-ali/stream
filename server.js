@@ -1,98 +1,108 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const cors = require('cors');
+// server.js
+const express = require("express");
+const http = require("http");
+const cors = require("cors");
+const { Server } = require("socket.io");
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
+
+const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "*", // Replace "*" with your GitHub Pages URL for stricter security
     methods: ["GET", "POST"]
   }
 });
 
-app.use(cors());
-app.use(express.json());
+app.use(cors()); // Allow HTTP requests from other origins
 
-// Store active rooms
-const rooms = new Map();
+const rooms = {}; // Store room info, including video buffers and clients
 
-// API endpoint to create a room
-app.post('/api/room', (req, res) => {
-  const roomId = Math.floor(1000 + Math.random() * 9000).toString();
-  rooms.set(roomId, {
-    users: new Map(), // socket.id -> {isHost, peerId}
-    hostId: null
-  });
-  res.json({ roomId });
-});
+io.on("connection", (socket) => {
+  console.log("Client connected:", socket.id);
 
-// API endpoint to check if room exists
-app.get('/api/room/:roomId', (req, res) => {
-  const roomId = req.params.roomId;
-  if (rooms.has(roomId)) {
-    res.json({ exists: true });
-  } else {
-    res.status(404).json({ exists: false });
-  }
-});
-
-// Socket.io connection handling
-io.on('connection', (socket) => {
-  let currentRoom = null;
-
-  socket.on('join-room', (roomId, isHost) => {
-    if (!rooms.has(roomId)) {
-      socket.emit('room-error', 'Room does not exist');
-      return;
+  socket.on("create-room", (roomId) => {
+    if (!rooms[roomId]) {
+      rooms[roomId] = {
+        host: socket.id,
+        clients: [],
+        fileBuffer: [],
+        receivedChunks: {},
+        fileMeta: null
+      };
     }
-
-    currentRoom = roomId;
     socket.join(roomId);
-    const room = rooms.get(roomId);
+    socket.emit("room-created", roomId);
+    console.log(`Room ${roomId} created by ${socket.id}`);
+  });
 
-    if (isHost) {
-      room.hostId = socket.id;
+  socket.on("join-room", (roomId) => {
+    const room = rooms[roomId];
+    if (room) {
+      room.clients.push(socket.id);
+      room.receivedChunks[socket.id] = 0;
+      socket.join(roomId);
+      socket.emit("room-joined", roomId);
+      console.log(`Client ${socket.id} joined room ${roomId}`);
+    } else {
+      socket.emit("error", "Room not found");
     }
+  });
 
-    room.users.set(socket.id, { isHost });
-    
-    // Notify about new connection
-    io.to(roomId).emit('user-count', room.users.size);
-    socket.emit('connection-status', 'Connected to server');
-
-    // Notify host about new viewer
-    if (!isHost && room.hostId) {
-      io.to(room.hostId).emit('new-viewer', socket.id);
+  socket.on("file-meta", ({ roomId, fileMeta }) => {
+    const room = rooms[roomId];
+    if (room) {
+      room.fileMeta = fileMeta;
     }
   });
 
-  // WebRTC signaling
-  socket.on('offer', (targetId, offer) => {
-    io.to(targetId).emit('offer', socket.id, offer);
+  socket.on("video-chunk", ({ roomId, chunk }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+
+    room.fileBuffer.push(chunk);
+
+    // Broadcast chunk to all viewers
+    room.clients.forEach((clientId) => {
+      io.to(clientId).emit("video-chunk", chunk);
+      room.receivedChunks[clientId] += chunk.byteLength;
+
+      // Check if all clients received at least 5%
+      const minReceived = Object.values(room.receivedChunks).every(
+        (bytes) => bytes >= room.fileMeta.size * 0.05
+      );
+
+      if (minReceived && !room.readyNotified) {
+        io.to(room.host).emit("ready-to-play");
+        room.readyNotified = true;
+      }
+    });
   });
 
-  socket.on('answer', (targetId, answer) => {
-    io.to(targetId).emit('answer', socket.id, answer);
+  socket.on("play", (roomId) => {
+    io.to(roomId).emit("play");
   });
 
-  socket.on('ice-candidate', (targetId, candidate) => {
-    io.to(targetId).emit('ice-candidate', socket.id, candidate);
+  socket.on("pause", (roomId) => {
+    io.to(roomId).emit("pause");
   });
 
-  socket.on('disconnect', () => {
-    if (currentRoom && rooms.has(currentRoom)) {
-      const room = rooms.get(currentRoom);
-      room.users.delete(socket.id);
+  socket.on("seek", ({ roomId, time }) => {
+    io.to(roomId).emit("seek", time);
+  });
 
-      if (room.hostId === socket.id) {
-        // Host disconnected - close room
-        io.to(currentRoom).emit('host-disconnected');
-        rooms.delete(currentRoom);
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+    for (const roomId in rooms) {
+      const room = rooms[roomId];
+
+      if (room.host === socket.id) {
+        io.to(roomId).emit("host-disconnected");
+        delete rooms[roomId];
       } else {
-        // Viewer disconnected
-        io.to(currentRoom).emit('user-count', room.users.size);
+        room.clients = room.clients.filter((id) => id !== socket.id);
+        delete room.receivedChunks[socket.id];
       }
     }
   });
