@@ -18,8 +18,20 @@ const io = socketIo(server, {
 app.use(cors());
 app.use(express.json());
 
-// Temporary storage for uploaded files
-const upload = multer({ dest: 'uploads/' });
+// Configure storage for uploaded files
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const roomId = req.params.roomId;
+    const dir = `uploads/${roomId}`;
+    fs.ensureDirSync(dir);
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    cb(null, file.originalname);
+  }
+});
+
+const upload = multer({ storage });
 
 // Store active rooms
 const rooms = new Map();
@@ -32,7 +44,7 @@ app.post('/api/room', (req, res) => {
   const roomId = Math.floor(1000 + Math.random() * 9000).toString();
   rooms.set(roomId, {
     users: new Set(),
-    videoPath: null,
+    videoInfo: null,
     playbackState: { isPlaying: false, currentTime: 0 }
   });
   res.json({ roomId });
@@ -56,22 +68,43 @@ app.post('/api/upload/:roomId', upload.single('video'), (req, res) => {
   }
   
   const room = rooms.get(roomId);
-  if (room.videoPath) {
-    fs.unlinkSync(room.videoPath);
+  if (room.videoInfo) {
+    try {
+      fs.unlinkSync(path.join('uploads', roomId, room.videoInfo.filename));
+    } catch (err) {
+      console.error('Error deleting old video:', err);
+    }
   }
   
-  room.videoPath = req.file.path;
+  room.videoInfo = {
+    filename: req.file.originalname,
+    path: req.file.path,
+    mimetype: req.file.mimetype
+  };
+  
+  // Notify all clients in the room about the new video
+  io.to(roomId).emit('video-ready', { 
+    url: `/api/stream/${roomId}/${encodeURIComponent(req.file.originalname)}`
+  });
+  
   res.json({ success: true });
 });
 
 // Video streaming endpoint
-app.get('/api/stream/:roomId', (req, res) => {
+app.get('/api/stream/:roomId/:filename', (req, res) => {
   const roomId = req.params.roomId;
-  if (!rooms.has(roomId) || !rooms.get(roomId).videoPath) {
+  const filename = decodeURIComponent(req.params.filename);
+  
+  if (!rooms.has(roomId)) {
+    return res.status(404).send('Room not found');
+  }
+  
+  const room = rooms.get(roomId);
+  if (!room.videoInfo || room.videoInfo.filename !== filename) {
     return res.status(404).send('Video not found');
   }
   
-  const videoPath = rooms.get(roomId).videoPath;
+  const videoPath = room.videoInfo.path;
   const stat = fs.statSync(videoPath);
   const fileSize = stat.size;
   const range = req.headers.range;
@@ -86,14 +119,14 @@ app.get('/api/stream/:roomId', (req, res) => {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
       'Content-Length': chunksize,
-      'Content-Type': 'video/mp4',
+      'Content-Type': room.videoInfo.mimetype,
     };
     res.writeHead(206, head);
     file.pipe(res);
   } else {
     const head = {
       'Content-Length': fileSize,
-      'Content-Type': 'video/mp4',
+      'Content-Type': room.videoInfo.mimetype,
     };
     res.writeHead(200, head);
     fs.createReadStream(videoPath).pipe(res);
@@ -119,10 +152,13 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('user-count', room.users.size);
     socket.emit('connection-status', 'Connected to server');
     
-    // Send current playback state to new user
-    if (room.videoPath) {
-      socket.emit('playback-state', room.playbackState);
+    // Send current video and playback state to new user
+    if (room.videoInfo) {
+      socket.emit('video-ready', { 
+        url: `/api/stream/${roomId}/${encodeURIComponent(room.videoInfo.filename)}`
+      });
     }
+    socket.emit('playback-state', room.playbackState);
   });
   
   socket.on('play', () => {
@@ -147,7 +183,6 @@ io.on('connection', (socket) => {
     if (currentRoom) {
       const room = rooms.get(currentRoom);
       room.playbackState.currentTime = time;
-      room.playbackState.isPlaying = false;
       socket.to(currentRoom).emit('seek', time);
       io.to(currentRoom).emit('playback-state', room.playbackState);
     }
@@ -161,8 +196,12 @@ io.on('connection', (socket) => {
       
       // Clean up room if empty
       if (room.users.size === 0) {
-        if (room.videoPath) {
-          fs.unlinkSync(room.videoPath);
+        if (room.videoInfo) {
+          try {
+            fs.removeSync(path.join('uploads', currentRoom));
+          } catch (err) {
+            console.error('Error cleaning up room:', err);
+          }
         }
         rooms.delete(currentRoom);
       }
