@@ -32,6 +32,7 @@
 
     <input id="roomInput" placeholder="Enter 4-digit Room ID" maxlength="4" style="width:100%; padding: 0.5rem; margin-bottom: 1rem;" />
     <button id="joinBtn" style="padding: 0.5rem 1rem;">Join Room</button>
+    <div id="deviceCount" style="margin-bottom: 1rem; font-weight: bold;">Connected Devices: 0</div>
 
     <div id="hostControls">
       <input type="file" id="videoFile" accept="video/*" style="width: 100%; margin-top: 1rem;" />
@@ -46,6 +47,7 @@
     const videoFile = document.getElementById('videoFile');
     const videoPlayer = document.getElementById('videoPlayer');
     const hostControls = document.getElementById('hostControls');
+    const deviceCount = document.getElementById('deviceCount');
 
     let socket, peerConn;
     let isHost = false;
@@ -72,6 +74,10 @@
 
       socket.onmessage = async (event) => {
         const data = JSON.parse(event.data);
+
+        if (data.type === 'count') {
+          deviceCount.textContent = `Connected Devices: ${data.count}`;
+        }
 
         if (data.type === 'user-joined' && !isHost) {
           // Peer joins
