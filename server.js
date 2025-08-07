@@ -1,72 +1,104 @@
-const express = require('express');
-const http = require('http');
-const WebSocket = require('ws');
-const app = express();
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const cors = require("cors");
 
+const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+app.use(cors());
+
 const rooms = {};
 
-wss.on('connection', (socket) => {
-  socket.on('message', (msg) => {
-    const data = JSON.parse(msg);
-
-    switch (data.type) {
-      case 'join':
-        if (!rooms[data.room]) rooms[data.room] = [];
-        rooms[data.room].push(socket);
-        socket.room = data.room;
-
-        // Broadcast updated connected count
-        broadcastCount(data.room);
-
-        // Notify other clients about new user
-        rooms[data.room].forEach(client => {
-          if (client !== socket && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'user-joined' }));
-          }
-        });
-        break;
-
-      case 'signal':
-        rooms[socket.room]?.forEach(client => {
-          if (client !== socket && client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'signal', signal: data.signal }));
-          }
-        });
-        break;
-
-      case 'control':
-        rooms[socket.room]?.forEach(client => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({ type: 'control', action: data.action, time: data.time }));
-          }
-        });
-        break;
+wss.on("connection", (ws) => {
+  ws.on("message", (msg) => {
+    let data;
+    try {
+      data = JSON.parse(msg);
+    } catch (e) {
+      return;
     }
-  });
 
-  socket.on('close', () => {
-    if (socket.room && rooms[socket.room]) {
-      rooms[socket.room] = rooms[socket.room].filter(s => s !== socket);
-      broadcastCount(socket.room);
-    }
-  });
-
-  function broadcastCount(room) {
-    const count = rooms[room]?.length || 0;
-    rooms[room]?.forEach(client => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: 'count', count }));
+    if (data.type === "join") {
+      const roomId = data.room;
+      if (!rooms[roomId]) {
+        rooms[roomId] = { clients: new Set(), hostId: null };
       }
-    });
-  }
+
+      rooms[roomId].clients.add(ws);
+      ws.roomId = roomId;
+      ws.clientId = Math.random().toString(36).substr(2, 9);
+      if (!rooms[roomId].hostId) rooms[roomId].hostId = ws.clientId;
+
+      ws.send(JSON.stringify({
+        type: "init",
+        isHost: rooms[roomId].hostId === ws.clientId,
+        clients: rooms[roomId].clients.size,
+      }));
+
+      broadcastToRoom(roomId, {
+        type: "clients",
+        count: rooms[roomId].clients.size,
+      });
+    }
+
+    else if (data.type === "signal") {
+      const room = rooms[ws.roomId];
+      if (!room) return;
+      for (let client of room.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: "signal",
+            from: ws.clientId,
+            signal: data.signal,
+          }));
+        }
+      }
+    }
+
+    else if (data.type === "playback") {
+      const room = rooms[ws.roomId];
+      if (!room) return;
+      for (let client of room.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({
+            type: "playback",
+            action: data.action,
+            time: data.time,
+          }));
+        }
+      }
+    }
+  });
+
+  ws.on("close", () => {
+    const roomId = ws.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    rooms[roomId].clients.delete(ws);
+    if (rooms[roomId].clients.size === 0) {
+      delete rooms[roomId];
+    } else {
+      broadcastToRoom(roomId, {
+        type: "clients",
+        count: rooms[roomId].clients.size,
+      });
+    }
+  });
 });
 
-app.use(express.static('public'));
+function broadcastToRoom(roomId, msg) {
+  if (!rooms[roomId]) return;
+  const message = JSON.stringify(msg);
+  for (let client of rooms[roomId].clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running at http://localhost:${PORT}`);
 });
