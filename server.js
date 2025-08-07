@@ -18,6 +18,10 @@ wss.on('connection', (socket) => {
         rooms[data.room].push(socket);
         socket.room = data.room;
 
+        // Broadcast updated connected count
+        broadcastCount(data.room);
+
+        // Notify other clients about new user
         rooms[data.room].forEach(client => {
           if (client !== socket && client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify({ type: 'user-joined' }));
@@ -44,15 +48,25 @@ wss.on('connection', (socket) => {
   });
 
   socket.on('close', () => {
-    const room = rooms[socket.room];
-    if (room) {
-      rooms[socket.room] = room.filter(s => s !== socket);
+    if (socket.room && rooms[socket.room]) {
+      rooms[socket.room] = rooms[socket.room].filter(s => s !== socket);
+      broadcastCount(socket.room);
     }
   });
+
+  function broadcastCount(room) {
+    const count = rooms[room]?.length || 0;
+    rooms[room]?.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: 'count', count }));
+      }
+    });
+  }
 });
 
 app.use(express.static('public'));
 
-server.listen(3000, () => {
-  console.log('Server running on http://localhost:3000');
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
