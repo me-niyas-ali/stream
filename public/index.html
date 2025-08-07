@@ -1,186 +1,145 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Video File Stream</title>
-  <style>
-    body {
-      background: #f8f9fa;
-      padding: 1rem;
-      font-family: Arial, sans-serif;
+import express from "express";
+import http from "http";
+import WebSocket, { WebSocketServer } from "ws";
+import cors from "cors";
+
+const app = express();
+app.use(cors()); // Enable CORS for all origins
+
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+const rooms = new Map(); // roomId => Set of clients
+
+function broadcastToRoom(roomId, data, excludeSocket = null) {
+  const clients = rooms.get(roomId);
+  if (!clients) return;
+  for (const client of clients) {
+    if (client !== excludeSocket && client.readyState === WebSocket.OPEN) {
+      client.send(data);
     }
-    .container {
-      max-width: 600px;
-      margin: auto;
-      text-align: center;
+  }
+}
+
+wss.on("connection", (ws) => {
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
+
+  ws.roomId = null;
+  ws.isHost = false;
+
+  ws.on("message", (message) => {
+    let msg;
+    try {
+      msg = JSON.parse(message);
+    } catch {
+      console.warn("Invalid JSON message");
+      return;
     }
-    #videoPlayer {
-      width: 100%;
-      max-height: 400px;
-      margin-top: 1rem;
-    }
-    #hostControls {
-      margin-top: 1rem;
-      display: none;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>Video File Streaming</h1>
 
-    <input id="roomInput" placeholder="Enter 4-digit Room ID" maxlength="4" style="width:100%; padding: 0.5rem; margin-bottom: 1rem;" />
-    <button id="joinBtn" style="padding: 0.5rem 1rem;">Join Room</button>
-    <div id="deviceCount" style="margin-bottom: 1rem; font-weight: bold;">Connected Devices: 0</div>
+    if (msg.type === "join") {
+      const roomId = msg.room;
+      ws.roomId = roomId;
 
-    <div id="hostControls">
-      <input type="file" id="videoFile" accept="video/*" style="width: 100%; margin-top: 1rem;" />
-    </div>
-
-    <video id="videoPlayer" controls></video>
-  </div>
-
-  <script>
-    const roomInput = document.getElementById('roomInput');
-    const joinBtn = document.getElementById('joinBtn');
-    const videoFile = document.getElementById('videoFile');
-    const videoPlayer = document.getElementById('videoPlayer');
-    const hostControls = document.getElementById('hostControls');
-    const deviceCount = document.getElementById('deviceCount');
-
-    let socket, peerConn;
-    let isHost = false;
-
-    joinBtn.onclick = () => {
-      const room = roomInput.value.trim();
-      if (room.length !== 4) {
-        alert('Enter valid 4-digit room ID');
-        return;
+      if (!rooms.has(roomId)) {
+        rooms.set(roomId, new Set());
       }
+      const clients = rooms.get(roomId);
 
-      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+      ws.isHost = clients.size === 0; // first client is host
+      clients.add(ws);
 
-      socket.onopen = () => {
-        socket.send(JSON.stringify({ type: 'join', room }));
-        joinBtn.textContent = 'Connected';
-        joinBtn.disabled = true;
+      // Notify client of init data
+      ws.send(JSON.stringify({
+        type: "init",
+        isHost: ws.isHost,
+        clients: clients.size
+      }));
 
-        // First user is host
-        isHost = true;
-        hostControls.style.display = 'block';
-        setupPeer(true);
-      };
+      // Notify all clients about current clients count
+      broadcastToRoom(roomId, JSON.stringify({
+        type: "clients",
+        count: clients.size
+      }));
+    }
 
-      socket.onmessage = async (event) => {
-        const data = JSON.parse(event.data);
-
-        if (data.type === 'count') {
-          deviceCount.textContent = `Connected Devices: ${data.count}`;
-        }
-
-        if (data.type === 'user-joined' && !isHost) {
-          // Peer joins
-          isHost = false;
-          setupPeer(false);
-          hostControls.style.display = 'none';
-        }
-
-        if (data.type === 'signal') {
-          await peerConn.setRemoteDescription(data.signal);
-          if (data.signal.type === 'offer') {
-            const answer = await peerConn.createAnswer();
-            await peerConn.setLocalDescription(answer);
-            socket.send(JSON.stringify({ type: 'signal', signal: answer }));
+    else if (msg.type === "signal") {
+      // Forward signaling to target client
+      const clients = rooms.get(ws.roomId);
+      if (!clients) return;
+      for (const client of clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          if (msg.to === client.id || !msg.to) { // msg.to can be undefined or target id if you implement ids
+            // We don’t assign client ids here, so send to all except sender
+            client.send(JSON.stringify({
+              type: "signal",
+              from: ws.id,
+              signal: msg.signal
+            }));
           }
         }
+      }
+    }
 
-        if (data.type === 'control') {
-          if (!isHost) {
-            if (data.action === 'play') videoPlayer.play();
-            else if (data.action === 'pause') videoPlayer.pause();
-            else if (data.action === 'seek') videoPlayer.currentTime = data.time;
-          }
+    else if (msg.type === "playback") {
+      // Broadcast playback control to all except sender
+      broadcastToRoom(ws.roomId, JSON.stringify({
+        type: "playback",
+        action: msg.action,
+        time: msg.time
+      }), ws);
+    }
+  });
+
+  ws.on("close", () => {
+    const roomId = ws.roomId;
+    if (!roomId) return;
+
+    const clients = rooms.get(roomId);
+    if (!clients) return;
+
+    clients.delete(ws);
+
+    // If room empty, delete it
+    if (clients.size === 0) {
+      rooms.delete(roomId);
+    } else {
+      // If host disconnected, assign new host (first in set)
+      if (ws.isHost) {
+        const newHost = clients.values().next().value;
+        if (newHost) {
+          newHost.isHost = true;
+          newHost.send(JSON.stringify({
+            type: "init",
+            isHost: true,
+            clients: clients.size
+          }));
         }
-      };
-
-      videoFile.onchange = () => {
-        const file = videoFile.files[0];
-        if (!file) return;
-
-        const url = URL.createObjectURL(file);
-        videoPlayer.src = url;
-
-        videoPlayer.onplay = () => sendControl('play');
-        videoPlayer.onpause = () => sendControl('pause');
-        videoPlayer.ontimeupdate = () => {
-          if (!videoPlayer.seeking && isHost) {
-            sendControl('seek', videoPlayer.currentTime);
-          }
-        };
-      };
-    };
-
-    function sendControl(action, time = 0) {
-      socket.send(JSON.stringify({ type: 'control', action, time }));
-    }
-
-    function setupPeer(initiator) {
-      peerConn = new RTCPeerConnection();
-
-      peerConn.ondatachannel = (e) => {
-        const receiveChannel = e.channel;
-        const receivedBuffers = [];
-        receiveChannel.binaryType = "arraybuffer";
-
-        receiveChannel.onmessage = (e) => {
-          receivedBuffers.push(e.data);
-          // Rebuild Blob and update video src for streaming effect
-          const blob = new Blob(receivedBuffers, { type: 'video/mp4' });
-          const url = URL.createObjectURL(blob);
-          videoPlayer.src = url;
-        };
-      };
-
-      if (initiator) {
-        const channel = peerConn.createDataChannel('video');
-        channel.binaryType = "arraybuffer";
-
-        channel.onopen = () => {
-          videoFile.onchange = () => {
-            const file = videoFile.files[0];
-            if (!file) return;
-            const chunkSize = 16 * 1024;
-            let offset = 0;
-
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              channel.send(e.target.result);
-              offset += e.target.result.byteLength;
-              if (offset < file.size) readSlice(offset);
-            };
-
-            function readSlice(o) {
-              const slice = file.slice(offset, o + chunkSize);
-              reader.readAsArrayBuffer(slice);
-            }
-
-            readSlice(0);
-          };
-        };
       }
-
-      peerConn.onicecandidate = (e) => {
-        if (e.candidate) return;
-        socket.send(JSON.stringify({ type: 'signal', signal: peerConn.localDescription }));
-      };
-
-      if (initiator) {
-        peerConn.createOffer().then(desc => {
-          peerConn.setLocalDescription(desc);
-        });
-      }
+      // Broadcast updated client count
+      broadcastToRoom(roomId, JSON.stringify({
+        type: "clients",
+        count: clients.size
+      }));
     }
-  </script>
-</body>
-</html>
+  });
+
+  // Optional: Ping/pong to detect dead connections
+  const interval = setInterval(() => {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  }, 30000);
+
+  ws.on("close", () => clearInterval(interval));
+});
+
+// Optional health check endpoint
+app.get("/", (req, res) => {
+  res.send("WebSocket signaling server is running.");
+});
+
+const port = process.env.PORT || 3000;
+server.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+});
