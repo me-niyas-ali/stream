@@ -4,23 +4,177 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Video File Stream</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css" />
+  <style>
+    body {
+      background: #f8f9fa;
+      padding: 1rem;
+      font-family: Arial, sans-serif;
+    }
+    .container {
+      max-width: 600px;
+      margin: auto;
+      text-align: center;
+    }
+    #videoPlayer {
+      width: 100%;
+      max-height: 400px;
+      margin-top: 1rem;
+    }
+    #hostControls {
+      margin-top: 1rem;
+      display: none;
+    }
+  </style>
 </head>
-<body class="p-4">
-  <div class="container text-center">
-    <h1 class="mb-4">Video File Streaming</h1>
+<body>
+  <div class="container">
+    <h1>Video File Streaming</h1>
 
-    <input id="roomInput" class="form-control mb-3" placeholder="Enter 4-digit Room ID" maxlength="4" />
-    <button id="joinBtn" class="btn btn-primary mb-3">Join Room</button>
+    <input id="roomInput" placeholder="Enter 4-digit Room ID" maxlength="4" style="width:100%; padding: 0.5rem; margin-bottom: 1rem;" />
+    <button id="joinBtn" style="padding: 0.5rem 1rem;">Join Room</button>
 
-    <div id="hostControls" class="d-none">
-      <input type="file" id="videoFile" accept="video/*" class="form-control mb-3" />
+    <div id="hostControls">
+      <input type="file" id="videoFile" accept="video/*" style="width: 100%; margin-top: 1rem;" />
     </div>
 
-    <video id="videoPlayer" controls class="w-100" style="max-height: 400px;"></video>
+    <video id="videoPlayer" controls></video>
   </div>
 
-  <script src="script.js"></script>
+  <script>
+    const roomInput = document.getElementById('roomInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const videoFile = document.getElementById('videoFile');
+    const videoPlayer = document.getElementById('videoPlayer');
+    const hostControls = document.getElementById('hostControls');
+
+    let socket, peerConn;
+    let isHost = false;
+
+    joinBtn.onclick = () => {
+      const room = roomInput.value.trim();
+      if (room.length !== 4) {
+        alert('Enter valid 4-digit room ID');
+        return;
+      }
+
+      socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`);
+
+      socket.onopen = () => {
+        socket.send(JSON.stringify({ type: 'join', room }));
+        joinBtn.textContent = 'Connected';
+        joinBtn.disabled = true;
+
+        // First user is host
+        isHost = true;
+        hostControls.style.display = 'block';
+        setupPeer(true);
+      };
+
+      socket.onmessage = async (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'user-joined' && !isHost) {
+          // Peer joins
+          isHost = false;
+          setupPeer(false);
+          hostControls.style.display = 'none';
+        }
+
+        if (data.type === 'signal') {
+          await peerConn.setRemoteDescription(data.signal);
+          if (data.signal.type === 'offer') {
+            const answer = await peerConn.createAnswer();
+            await peerConn.setLocalDescription(answer);
+            socket.send(JSON.stringify({ type: 'signal', signal: answer }));
+          }
+        }
+
+        if (data.type === 'control') {
+          if (!isHost) {
+            if (data.action === 'play') videoPlayer.play();
+            else if (data.action === 'pause') videoPlayer.pause();
+            else if (data.action === 'seek') videoPlayer.currentTime = data.time;
+          }
+        }
+      };
+
+      videoFile.onchange = () => {
+        const file = videoFile.files[0];
+        if (!file) return;
+
+        const url = URL.createObjectURL(file);
+        videoPlayer.src = url;
+
+        videoPlayer.onplay = () => sendControl('play');
+        videoPlayer.onpause = () => sendControl('pause');
+        videoPlayer.ontimeupdate = () => {
+          if (!videoPlayer.seeking && isHost) {
+            sendControl('seek', videoPlayer.currentTime);
+          }
+        };
+      };
+    };
+
+    function sendControl(action, time = 0) {
+      socket.send(JSON.stringify({ type: 'control', action, time }));
+    }
+
+    function setupPeer(initiator) {
+      peerConn = new RTCPeerConnection();
+
+      peerConn.ondatachannel = (e) => {
+        const receiveChannel = e.channel;
+        const receivedBuffers = [];
+        receiveChannel.binaryType = "arraybuffer";
+
+        receiveChannel.onmessage = (e) => {
+          receivedBuffers.push(e.data);
+          // Rebuild Blob and update video src for streaming effect
+          const blob = new Blob(receivedBuffers, { type: 'video/mp4' });
+          const url = URL.createObjectURL(blob);
+          videoPlayer.src = url;
+        };
+      };
+
+      if (initiator) {
+        const channel = peerConn.createDataChannel('video');
+        channel.binaryType = "arraybuffer";
+
+        channel.onopen = () => {
+          videoFile.onchange = () => {
+            const file = videoFile.files[0];
+            if (!file) return;
+            const chunkSize = 16 * 1024;
+            let offset = 0;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              channel.send(e.target.result);
+              offset += e.target.result.byteLength;
+              if (offset < file.size) readSlice(offset);
+            };
+
+            function readSlice(o) {
+              const slice = file.slice(offset, o + chunkSize);
+              reader.readAsArrayBuffer(slice);
+            }
+
+            readSlice(0);
+          };
+        };
+      }
+
+      peerConn.onicecandidate = (e) => {
+        if (e.candidate) return;
+        socket.send(JSON.stringify({ type: 'signal', signal: peerConn.localDescription }));
+      };
+
+      if (initiator) {
+        peerConn.createOffer().then(desc => {
+          peerConn.setLocalDescription(desc);
+        });
+      }
+    }
+  </script>
 </body>
 </html>
