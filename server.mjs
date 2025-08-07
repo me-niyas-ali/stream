@@ -1,7 +1,7 @@
-import express from "express";
-import http from "http";
-import WebSocket, { WebSocketServer } from "ws";
-import cors from "cors";
+const express = require("express");
+const http = require("http");
+const WebSocket = require("ws");
+const cors = require("cors");
 
 const app = express();
 app.use(cors()); // Enable CORS for all origins
