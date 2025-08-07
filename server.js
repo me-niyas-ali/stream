@@ -33,14 +33,11 @@ io.on("connection", (socket) => {
     const isHost = socket.id === room.host;
     socket.emit("joined", { roomId, isHost });
     io.to(roomId).emit("peer-count", room.peers.size);
-
-    console.log(`${socket.id} joined room ${roomId}. Host: ${room.host}`);
   });
 
   socket.on("leave-room", (roomId) => {
     leaveRoom(socket, roomId);
     socket.emit("left-room");
-    console.log(`${socket.id} left room ${roomId}`);
   });
 
   socket.on("disconnect", () => {
@@ -52,12 +49,17 @@ io.on("connection", (socket) => {
 
   socket.on("video-chunk", ({ roomId, chunk }) => {
     socket.to(roomId).emit("receive-chunk", chunk);
-    console.log(`Chunk forwarded to peers in room ${roomId}`);
+    console.log(`Chunk sent to peers in room ${roomId}`);
+  });
+
+  socket.on("video-size", ({ roomId, size }) => {
+    socket.to(roomId).emit("video-size", { size });
+    console.log(`Video size ${size} sent to peers in room ${roomId}`);
   });
 
   socket.on("video-control", ({ roomId, action, time }) => {
     socket.to(roomId).emit("video-control", { action, time });
-    console.log(`Video control: ${action} at ${time}s in room ${roomId}`);
+    console.log(`Video ${action} at ${time}s in room ${roomId}`);
   });
 
   function leaveRoom(socket, roomId) {
@@ -65,14 +67,13 @@ io.on("connection", (socket) => {
     if (!room) return;
 
     room.peers.delete(socket.id);
-
-    if (socket.id === room.host) {
-      console.log(`Host ${socket.id} left room ${roomId}. Ending session.`);
+    if (room.host === socket.id) {
+      console.log(`Host left room ${roomId}`);
       io.to(roomId).emit("left-room");
       delete rooms[roomId];
     } else {
       io.to(roomId).emit("peer-count", room.peers.size);
-      console.log(`Peer ${socket.id} removed from room ${roomId}`);
+      console.log(`Peer ${socket.id} left room ${roomId}`);
     }
 
     socket.leave(roomId);
