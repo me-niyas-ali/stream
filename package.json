@@ -1,5 +1,5 @@
 {
-  "name": "video-stream-server",
+  "name": "video-stream-app",
   "version": "1.0.0",
   "description": "Local video file streaming server with real-time synchronization",
   "main": "server.js",
